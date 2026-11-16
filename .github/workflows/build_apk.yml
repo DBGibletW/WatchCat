@@ -173,16 +173,16 @@ jobs:
               resized = base_icon.resize((px, px), Image.Resampling.LANCZOS)
               resized.save(out_dir / "ic_launcher.png")
 
-          # 5. WatchCat Bildirim İkonu (Şeffaf arka planlı beyaz kedi silüeti)
+          # 5. WatchCat Bildirim İkonu (Orta-Büyük Boyutlu Şeffaf Kedi Silüeti)
           notif_base = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
           notif_draw = ImageDraw.Draw(notif_base)
           pure_white = (255, 255, 255, 255)
           transparent = (0, 0, 0, 0)
 
-          notif_draw.polygon([(96, 232), (124, 66), (234, 168)], fill=pure_white)
-          notif_draw.polygon([(416, 232), (388, 66), (278, 168)], fill=pure_white)
-          notif_draw.ellipse((86, 136, 426, 448), fill=pure_white)
-          notif_draw.polygon([(212, 224), (212, 360), (332, 292)], fill=transparent)
+          notif_draw.polygon([(44, 232), (72, 20), (222, 138)], fill=pure_white)
+          notif_draw.polygon([(468, 232), (440, 20), (290, 138)], fill=pure_white)
+          notif_draw.ellipse((24, 108, 488, 492), fill=pure_white)
+          notif_draw.polygon([(198, 214), (198, 386), (356, 300)], fill=transparent)
 
           notif_sizes = {
               "drawable-mdpi": 24,
