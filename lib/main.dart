@@ -14,6 +14,8 @@ import 'screens/main_shell.dart';
 const MethodChannel _notificationChannel =
     MethodChannel('com.dbgibletw.watchcat/notifications');
 
+bool _isSubscribingAllUsers = false;
+
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
@@ -117,6 +119,24 @@ class WatchCatApp extends StatelessWidget {
   }
 }
 
+Future<void> _ensureAllUsersSubscribed({
+  required bool alreadySubscribed,
+}) async {
+  if (alreadySubscribed || _isSubscribingAllUsers) return;
+  _isSubscribingAllUsers = true;
+
+  try {
+    await FirebaseMessaging.instance.subscribeToTopic('all_users');
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      await _notificationChannel.invokeMethod<bool>('markAllUsersSubscribed');
+    }
+  } catch (_) {
+    // Çevrimdışı durumda sessizce geçer, izin aktifken sonraki kontrolde tamamlanır.
+  } finally {
+    _isSubscribingAllUsers = false;
+  }
+}
+
 class _NotificationBootstrapper extends StatefulWidget {
   const _NotificationBootstrapper({required this.child});
 
@@ -155,14 +175,13 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
     }
   }
 
-  Future<void> _activateFcmSubscription() async {
+  Future<void> _syncFcmAfterGrant({required bool alreadySubscribed}) async {
     try {
-      final messaging = FirebaseMessaging.instance;
-      await messaging.subscribeToTopic('all_users');
+      await _ensureAllUsersSubscribed(alreadySubscribed: alreadySubscribed);
 
       final currentUser = FirebaseAuth.instance.currentUser;
       if (currentUser != null) {
-        final token = await messaging.getToken();
+        final token = await FirebaseMessaging.instance.getToken();
         if (token != null && token.isNotEmpty) {
           await FirebaseFirestore.instance
               .collection('users')
@@ -171,7 +190,7 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
         }
       }
     } catch (_) {
-      // Ağ veya Play Services kaynaklı geçici hatalarda uygulamanın çökmesini önler.
+      // Ağ veya Google Play Services kaynaklı geçici hatalarda uygulamanın çökmesini önler.
     }
   }
 
@@ -181,17 +200,8 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
     } catch (_) {}
   }
 
-  Future<void> _showNotificationExplanationDialog({
-    required bool isAndroid13OrAbove,
-  }) async {
+  Future<void> _showEnableNotificationsDialog() async {
     if (!mounted) return;
-
-    final title = isAndroid13OrAbove
-        ? 'Bildirim İzni Kapalı'
-        : 'Bildirimler Sistem Ayarlarından Kapalı';
-    final description = isAndroid13OrAbove
-        ? 'Yeni kedi videolarından ve WatchCat duyurularından haberdar olabilmen için bildirim iznine ihtiyacımız var. İstersen uygulama ayarlarından bildirimleri açabilirsin.'
-        : 'WatchCat bildirimleri cihazının sistem ayarlarından kapatılmış görünüyor. Bildirimleri tekrar almak için ayarlara gidip açabilirsin.';
 
     await showDialog<void>(
       context: context,
@@ -200,16 +210,16 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(18),
         ),
-        title: Text(
-          title,
-          style: const TextStyle(
+        title: const Text(
+          '🔔 WatchCat Bildirimlerini Aç!',
+          style: TextStyle(
             fontWeight: FontWeight.w700,
             color: Colors.white,
           ),
         ),
-        content: Text(
-          description,
-          style: const TextStyle(
+        content: const Text(
+          'Yeni kedi videolarını ve uygulama güncellemelerini kaçırmamak için bildirimlerini etkinleştir.',
+          style: TextStyle(
             color: Color(0xFFD0D0DE),
             height: 1.45,
           ),
@@ -228,7 +238,7 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
               backgroundColor: const Color(0xFFFF6B4A),
               foregroundColor: Colors.white,
             ),
-            child: const Text('Ayarları Aç'),
+            child: const Text('Bildirim Ayarlarını Aç'),
           ),
         ],
       ),
@@ -243,10 +253,10 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
         SnackBar(
           duration: const Duration(seconds: 5),
           content: const Text(
-            'Bildirimler kapalı. Açmak için uygulama ayarlarına gidebilirsin.',
+            'Bildirimler kapalı. Bildirim Ayarlarını Aç üzerinden etkinleştirebilirsin.',
           ),
           action: SnackBarAction(
-            label: 'Ayarları Aç',
+            label: 'Bildirim Ayarlarını Aç',
             textColor: const Color(0xFFFF6B4A),
             onPressed: _openSystemNotificationSettings,
           ),
@@ -273,19 +283,19 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
       final isAndroid13OrAbove = state['isAndroid13OrAbove'] == true;
       final granted = state['granted'] == true;
       final shouldRequestRuntime = state['shouldRequestRuntime'] == true;
+      final alreadySubscribed = state['allUsersSubscribed'] == true;
 
       if (shouldRequestRuntime) {
+        // Android 13, 14, 15+: İlk açılışta gerçek sistem bildirim izni penceresi
         final grantedNow = await _notificationChannel
                 .invokeMethod<bool>('requestNotificationPermission') ??
             false;
         _lastKnownGranted = grantedNow;
 
         if (grantedNow) {
-          await _activateFcmSubscription();
+          await _syncFcmAfterGrant(alreadySubscribed: alreadySubscribed);
         } else {
-          await _showNotificationExplanationDialog(
-            isAndroid13OrAbove: true,
-          );
+          await _showEnableNotificationsDialog();
         }
         return;
       }
@@ -293,7 +303,8 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
       if (granted) {
         final becameEnabled = _lastKnownGranted == false;
         _lastKnownGranted = true;
-        await _activateFcmSubscription();
+        await _syncFcmAfterGrant(alreadySubscribed: alreadySubscribed);
+
         if (becameEnabled && mounted) {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             const SnackBar(
@@ -308,12 +319,10 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
 
       if (isInitialLaunch) {
         if (!isAndroid13OrAbove) {
-          // Android 10, 11 ve 12: sistem ayarlarından kapalıysa ayarlardan açma seçeneği sun
-          await _showNotificationExplanationDialog(
-            isAndroid13OrAbove: false,
-          );
+          // Android 11 ve 12: Bildirimler kapalıysa uygulama içi bilgilendirme ekranını göster
+          await _showEnableNotificationsDialog();
         } else {
-          // Android 13+: daha önce reddedildiyse tekrar sistem penceresi zorlama, bilgilendirme göster
+          // Android 13+: Daha önce reddedildiyse tekrar sistem penceresi zorlama
           _showSettingsHintSnackBar();
         }
       }
@@ -335,7 +344,7 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
       if (current.authorizationStatus == AuthorizationStatus.authorized ||
           current.authorizationStatus == AuthorizationStatus.provisional) {
         _lastKnownGranted = true;
-        await _activateFcmSubscription();
+        await _syncFcmAfterGrant(alreadySubscribed: false);
         return;
       }
 
@@ -351,7 +360,7 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
                 requested.authorizationStatus == AuthorizationStatus.provisional;
         _lastKnownGranted = grantedNow;
         if (grantedNow) {
-          await _activateFcmSubscription();
+          await _syncFcmAfterGrant(alreadySubscribed: false);
         }
       }
     } catch (_) {}
@@ -419,29 +428,26 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
     _setupFcm();
   }
 
-  Future<bool> _isNotificationPermissionGranted() async {
-    try {
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-        final state = await _notificationChannel
-            .invokeMapMethod<String, dynamic>('getNotificationState');
-        return state?['granted'] == true;
-      }
-      final settings =
-          await FirebaseMessaging.instance.getNotificationSettings();
-      return settings.authorizationStatus == AuthorizationStatus.authorized ||
-          settings.authorizationStatus == AuthorizationStatus.provisional;
-    } catch (_) {
-      return false;
-    }
-  }
-
   Future<void> _setupFcm() async {
     try {
       final messaging = FirebaseMessaging.instance;
-      final isGranted = await _isNotificationPermissionGranted();
+      bool isGranted = false;
+      bool alreadySubscribed = false;
+
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        final state = await _notificationChannel
+            .invokeMapMethod<String, dynamic>('getNotificationState');
+        isGranted = state?['granted'] == true;
+        alreadySubscribed = state?['allUsersSubscribed'] == true;
+      } else {
+        final settings = await messaging.getNotificationSettings();
+        isGranted =
+            settings.authorizationStatus == AuthorizationStatus.authorized ||
+                settings.authorizationStatus == AuthorizationStatus.provisional;
+      }
 
       if (isGranted) {
-        await messaging.subscribeToTopic('all_users');
+        await _ensureAllUsersSubscribed(alreadySubscribed: alreadySubscribed);
 
         if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
           final apnsToken = await messaging.getAPNSToken();
