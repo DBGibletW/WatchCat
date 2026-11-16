@@ -17,8 +17,8 @@ class UploadScreen extends StatefulWidget {
 }
 
 class _UploadScreenState extends State<UploadScreen> {
-  static const String _cloudinaryCloudName = 'CLOUD_NAME_BURAYA';
-  static const String _cloudinaryUploadPreset = 'UPLOAD_PRESET_BURAYA';
+  static const String _cloudinaryCloudName = 'yluzbcka';
+  static const String _cloudinaryUploadPreset = 'watchcat_preset';
   static const Duration _maxVideoDuration = Duration(seconds: 40);
 
   final ImagePicker _picker = ImagePicker();
