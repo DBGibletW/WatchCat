@@ -28,7 +28,7 @@ jobs:
       - name: İkon Kütüphanesini Hazırla
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil
 
-      - name: Android Klasörünü Oluştur, Bildirim İzni, Logo ve Firebase Bağla
+      - name: Android Klasörünü Oluştur, Bildirim Kanalı, Logo ve Firebase Bağla
         run: |
           cp pubspec.yaml /tmp/pubspec.yaml.bak
           cp -r lib /tmp/lib.bak
@@ -56,6 +56,7 @@ jobs:
           python3 - << 'EOF'
           from pathlib import Path
           import re
+          import textwrap
           from PIL import Image, ImageDraw
 
           plugin_id = "com.google.gms.google-services"
@@ -84,7 +85,7 @@ jobs:
                   )
                   settings_groovy.write_text(text)
 
-          # 2. app/build.gradle(.kts) -> Google Services + minSdk 24 + compileSdk/targetSdk >= 35
+          # 2. app/build.gradle(.kts) -> Google Services + minSdk 24 (Android 7.0+) + compileSdk/targetSdk >= 35
           app_kts = Path("android/app/build.gradle.kts")
           app_groovy = Path("android/app/build.gradle")
           if app_kts.exists():
@@ -141,27 +142,41 @@ jobs:
               text = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 24', text)
               app_groovy.write_text(text)
 
-          # 3. MainActivity.kt -> Android 11-12 / 13+ Bildirim İzni ve Tek Seferlik Abonelik Takibi
+          # 3. MainActivity.kt -> Android 7.1.2 / 11-12 / 13+ Kanal, İzin ve Ön Plan Bildirim Yönetimi
           main_activity = Path("android/app/src/main/kotlin/com/dbgibletw/watchcat/MainActivity.kt")
           main_activity.parent.mkdir(parents=True, exist_ok=True)
-          main_activity.write_text('''package com.dbgibletw.watchcat
+          main_activity.write_text(textwrap.dedent('''\
+          package com.dbgibletw.watchcat
 
           import android.Manifest
+          import android.app.Notification
+          import android.app.NotificationChannel
           import android.app.NotificationManager
+          import android.app.PendingIntent
           import android.content.ActivityNotFoundException
           import android.content.Context
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.media.AudioAttributes
+          import android.media.RingtoneManager
           import android.net.Uri
           import android.os.Build
+          import android.os.Bundle
           import android.provider.Settings
+          import android.util.Log
+          import com.google.android.gms.common.ConnectionResult
+          import com.google.android.gms.common.GoogleApiAvailability
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
 
           class MainActivity : FlutterActivity() {
               companion object {
+                  private const val TAG = "WatchCatFCM"
                   private const val CHANNEL = "com.dbgibletw.watchcat/notifications"
+                  private const val DEFAULT_CHANNEL_ID = "watchcat_default_channel"
+                  private const val DEFAULT_CHANNEL_NAME = "WatchCat Bildirimleri"
                   private const val REQUEST_CODE_POST_NOTIFICATIONS = 1001
                   private const val PREFS_NAME = "watchcat_notification_prefs"
                   private const val KEY_ASKED_BEFORE = "asked_post_notifications"
@@ -169,6 +184,12 @@ jobs:
               }
 
               private var pendingPermissionResult: MethodChannel.Result? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  // Android 8+ (Android 12 dahil) ilk kanalı uygulama ön plandayken oluştur
+                  ensureNotificationChannel()
+              }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
@@ -193,9 +214,67 @@ jobs:
                                   openAppNotificationSettings()
                                   result.success(true)
                               }
+                              "showLocalNotification" -> {
+                                  val title = call.argument<String>("title") ?: "WatchCat"
+                                  val body = call.argument<String>("body") ?: ""
+                                  result.success(showLocalNotification(title, body))
+                              }
                               else -> result.notImplemented()
                           }
                       }
+              }
+
+              private fun ensureNotificationChannel(): String {
+                  // Android 7.1.2 (API 25) ve altı NotificationChannel gerektirmez
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                      Log.d(TAG, "SDK ${Build.VERSION.SDK_INT} (< 26): NotificationChannel atlandi.")
+                      return "skipped_pre_oreo"
+                  }
+
+                  val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                      ?: return "error_no_notification_manager"
+
+                  val existing = manager.getNotificationChannel(DEFAULT_CHANNEL_ID)
+                  if (existing != null) {
+                      return "already_exists_importance_${existing.importance}"
+                  }
+
+                  val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                  val audioAttributes = AudioAttributes.Builder()
+                      .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                      .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                      .build()
+
+                  val channel = NotificationChannel(
+                      DEFAULT_CHANNEL_ID,
+                      DEFAULT_CHANNEL_NAME,
+                      NotificationManager.IMPORTANCE_HIGH,
+                  ).apply {
+                      description = "WatchCat yeni kedi videolari ve duyuru bildirimleri"
+                      enableLights(true)
+                      lightColor = Color.parseColor("#FF6B4A")
+                      enableVibration(true)
+                      setSound(soundUri, audioAttributes)
+                      lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                  }
+
+                  manager.createNotificationChannel(channel)
+                  Log.d(TAG, "Bildirim kanali olusturuldu: $DEFAULT_CHANNEL_ID")
+                  return "created_$DEFAULT_CHANNEL_ID"
+              }
+
+              private fun checkGooglePlayServices(): Pair<Boolean, String> {
+                  return try {
+                      val availability = GoogleApiAvailability.getInstance()
+                      val code = availability.isGooglePlayServicesAvailable(this)
+                      val ok = code == ConnectionResult.SUCCESS
+                      val status = availability.getErrorString(code)
+                      Log.d(TAG, "Google Play Services: ok=$ok, status=$status (code=$code)")
+                      Pair(ok, status)
+                  } catch (e: Throwable) {
+                      Log.e(TAG, "Google Play Services kontrol hatasi", e)
+                      Pair(false, e.message ?: "check_failed")
+                  }
               }
 
               private fun areNotificationsEnabled(): Boolean {
@@ -204,6 +283,9 @@ jobs:
               }
 
               private fun buildNotificationState(): Map<String, Any> {
+                  val channelStatus = ensureNotificationChannel()
+                  val (playServicesAvailable, playServicesStatus) = checkGooglePlayServices()
+
                   val sdkInt = Build.VERSION.SDK_INT
                   val isAndroid13OrAbove = sdkInt >= Build.VERSION_CODES.TIRAMISU
                   val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -224,11 +306,15 @@ jobs:
 
                   return mapOf(
                       "sdkInt" to sdkInt,
+                      "androidRelease" to (Build.VERSION.RELEASE ?: ""),
                       "isAndroid13OrAbove" to isAndroid13OrAbove,
                       "granted" to granted,
                       "askedBefore" to askedBefore,
                       "shouldRequestRuntime" to shouldRequestRuntime,
                       "allUsersSubscribed" to allUsersSubscribed,
+                      "playServicesAvailable" to playServicesAvailable,
+                      "playServicesStatus" to playServicesStatus,
+                      "channelStatus" to channelStatus,
                   )
               }
 
@@ -273,6 +359,56 @@ jobs:
                   }
               }
 
+              private fun showLocalNotification(title: String, body: String): Map<String, Any> {
+                  val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                      ?: return mapOf("shown" to false, "error" to "NotificationManager bulunamadi")
+
+                  if (!manager.areNotificationsEnabled()) {
+                      return mapOf("shown" to false, "error" to "Sistem ayarlarindan bildirimler kapali")
+                  }
+
+                  return try {
+                      val launchIntent = Intent(this, MainActivity::class.java).apply {
+                          flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                      }
+                      val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                      } else {
+                          PendingIntent.FLAG_UPDATE_CURRENT
+                      }
+                      val pendingIntent = PendingIntent.getActivity(this, 0, launchIntent, pendingFlags)
+
+                      val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          ensureNotificationChannel()
+                          Notification.Builder(this, DEFAULT_CHANNEL_ID)
+                      } else {
+                          // Android 7.1.2 (API 25): channelId kullanma, varsayılan ses ve yüksek öncelik ver
+                          @Suppress("DEPRECATION")
+                          Notification.Builder(this)
+                              .setPriority(Notification.PRIORITY_HIGH)
+                              .setDefaults(Notification.DEFAULT_ALL)
+                      }
+
+                      val notification = builder
+                          .setSmallIcon(R.drawable.ic_stat_watchcat)
+                          .setColor(Color.parseColor("#FF6B4A"))
+                          .setContentTitle(title.ifBlank { "WatchCat" })
+                          .setContentText(body)
+                          .setStyle(Notification.BigTextStyle().bigText(body))
+                          .setAutoCancel(true)
+                          .setContentIntent(pendingIntent)
+                          .build()
+
+                      val notifId = (System.currentTimeMillis() and 0x7FFFFFFF).toInt()
+                      manager.notify(notifId, notification)
+                      Log.d(TAG, "Bildirim ekranda gosterildi: id=$notifId")
+                      mapOf("shown" to true, "notificationId" to notifId)
+                  } catch (e: Exception) {
+                      Log.e(TAG, "Bildirim gosterilemedi", e)
+                      mapOf("shown" to false, "error" to (e.message ?: e.toString()))
+                  }
+              }
+
               private fun openAppNotificationSettings() {
                   val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
@@ -296,36 +432,54 @@ jobs:
                   }
               }
           }
-          '''.replace("\n          ", "\n").lstrip())
+          '''))
 
-          # 4. AndroidManifest.xml -> İzinler, Uygulama Adı ve FCM Bildirim İkonu
+          # 4. AndroidManifest.xml -> İzinler, Uygulama Adı, FCM Varsayılan Kanalı, İkon ve Renk
           manifest = Path("android/app/src/main/AndroidManifest.xml")
           if manifest.exists():
               text = manifest.read_text()
-              perms = []
-              if "android.permission.INTERNET" not in text:
-                  perms.append('    <uses-permission android:name="android.permission.INTERNET"/>')
-              if "android.permission.POST_NOTIFICATIONS" not in text:
-                  perms.append('    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>')
-              if perms:
+              required_perms = [
+                  "android.permission.INTERNET",
+                  "android.permission.ACCESS_NETWORK_STATE",
+                  "android.permission.WAKE_LOCK",
+                  "android.permission.VIBRATE",
+                  "android.permission.POST_NOTIFICATIONS",
+              ]
+              perms_to_add = [
+                  f'    <uses-permission android:name="{perm}"/>'
+                  for perm in required_perms
+                  if perm not in text
+              ]
+              if perms_to_add:
                   text = re.sub(
                       r'(<manifest[^>]*>)',
-                      r'\1\n' + "\n".join(perms),
+                      r'\1\n' + "\n".join(perms_to_add),
                       text,
                       count=1,
                   )
               text = re.sub(r'android:label="[^"]*"', 'android:label="WatchCat"', text, count=1)
 
+              meta_lines = []
+              if "com.google.firebase.messaging.default_notification_channel_id" not in text:
+                  meta_lines.append(
+                      '        <meta-data\n'
+                      '            android:name="com.google.firebase.messaging.default_notification_channel_id"\n'
+                      '            android:value="watchcat_default_channel" />'
+                  )
               if "com.google.firebase.messaging.default_notification_icon" not in text:
-                  meta_block = (
+                  meta_lines.append(
                       '        <meta-data\n'
                       '            android:name="com.google.firebase.messaging.default_notification_icon"\n'
-                      '            android:resource="@drawable/ic_stat_watchcat" />\n'
+                      '            android:resource="@drawable/ic_stat_watchcat" />'
+                  )
+              if "com.google.firebase.messaging.default_notification_color" not in text:
+                  meta_lines.append(
                       '        <meta-data\n'
                       '            android:name="com.google.firebase.messaging.default_notification_color"\n'
-                      '            android:resource="@color/watchcat_notification_color" />\n'
+                      '            android:resource="@color/watchcat_notification_color" />'
                   )
-                  text = text.replace("</application>", meta_block + "    </application>")
+              if meta_lines:
+                  text = text.replace("</application>", "\n".join(meta_lines) + "\n    </application>")
 
               manifest.write_text(text)
 
