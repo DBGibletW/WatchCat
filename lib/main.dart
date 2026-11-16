@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'screens/auth_screen.dart';
-import 'screens/feed_screen.dart';
+import 'screens/main_shell.dart';
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -26,7 +26,6 @@ Future<void> main() async {
     DeviceOrientation.portraitUp,
   ]);
 
-  // Alttaki telefon butonlarını gizleyen tam ekran modu
   await SystemChrome.setEnabledSystemUIMode(
     SystemUiMode.immersiveSticky,
   );
@@ -137,7 +136,7 @@ class AuthGate extends StatelessWidget {
         return FcmSessionWrapper(
           key: ValueKey(user.uid),
           uid: user.uid,
-          child: const FeedScreen(),
+          child: const MainShell(),
         );
       },
     );
@@ -179,7 +178,6 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
         sound: true,
       );
 
-      // Firebase Console'dan tek seferde herkese manuel bildirim atabilmek için
       await messaging.subscribeToTopic('all_users');
 
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
