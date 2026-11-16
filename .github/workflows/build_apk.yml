@@ -111,7 +111,7 @@ jobs:
               text = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 24', text)
               app_groovy.write_text(text)
 
-          # 3. AndroidManifest.xml -> Internet, Bildirim izni ve Uygulama Adı
+          # 3. AndroidManifest.xml -> İzinler, Uygulama Adı ve FCM Bildirim İkonu
           manifest = Path("android/app/src/main/AndroidManifest.xml")
           if manifest.exists():
               text = manifest.read_text()
@@ -128,9 +128,23 @@ jobs:
                       count=1,
                   )
               text = re.sub(r'android:label="[^"]*"', 'android:label="WatchCat"', text, count=1)
+
+              if "com.google.firebase.messaging.default_notification_icon" not in text:
+                  meta_block = (
+                      '        <meta-data\n'
+                      '            android:name="com.google.firebase.messaging.default_notification_icon"\n'
+                      '            android:resource="@drawable/ic_stat_watchcat" />\n'
+                      '        <meta-data\n'
+                      '            android:name="com.google.firebase.messaging.default_notification_color"\n'
+                      '            android:resource="@color/watchcat_notification_color" />\n'
+                  )
+                  text = text.replace("</application>", meta_block + "    </application>")
+
               manifest.write_text(text)
 
-          # 4. WatchCat Uygulama İkonu (logo.png varsa onu, yoksa özel kedi logosunu kullan)
+          res_dir = Path("android/app/src/main/res")
+
+          # 4. WatchCat Ana Uygulama İkonu (logo.png varsa onu, yoksa özel kedi logosunu kullan)
           custom_logo = Path("/tmp/logo.png")
           if custom_logo.exists():
               base_icon = Image.open(custom_logo).convert("RGBA")
@@ -141,12 +155,9 @@ jobs:
               coral = (255, 107, 74, 255)
               white = (255, 255, 255, 255)
 
-              # Sol ve sağ kedi kulakları
               draw.polygon([(115, 225), (140, 88), (238, 175)], fill=coral)
               draw.polygon([(397, 225), (372, 88), (274, 175)], fill=coral)
-              # Kedi yüzü
               draw.ellipse((106, 145, 406, 425), fill=coral)
-              # Ortada beyaz oynat (Play) üçgeni
               draw.polygon([(220, 228), (220, 342), (322, 285)], fill=white)
 
           mipmap_sizes = {
@@ -156,12 +167,55 @@ jobs:
               "mipmap-xxhdpi": 144,
               "mipmap-xxxhdpi": 192,
           }
-          res_dir = Path("android/app/src/main/res")
           for folder, px in mipmap_sizes.items():
               out_dir = res_dir / folder
               out_dir.mkdir(parents=True, exist_ok=True)
               resized = base_icon.resize((px, px), Image.Resampling.LANCZOS)
               resized.save(out_dir / "ic_launcher.png")
+
+          # 5. WatchCat Bildirim İkonu (Şeffaf arka planlı beyaz kedi silüeti)
+          notif_base = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+          notif_draw = ImageDraw.Draw(notif_base)
+          pure_white = (255, 255, 255, 255)
+          transparent = (0, 0, 0, 0)
+
+          notif_draw.polygon([(96, 232), (124, 66), (234, 168)], fill=pure_white)
+          notif_draw.polygon([(416, 232), (388, 66), (278, 168)], fill=pure_white)
+          notif_draw.ellipse((86, 136, 426, 448), fill=pure_white)
+          notif_draw.polygon([(212, 224), (212, 360), (332, 292)], fill=transparent)
+
+          notif_sizes = {
+              "drawable-mdpi": 24,
+              "drawable-hdpi": 36,
+              "drawable-xhdpi": 48,
+              "drawable-xxhdpi": 72,
+              "drawable-xxxhdpi": 96,
+          }
+          for folder, px in notif_sizes.items():
+              out_dir = res_dir / folder
+              out_dir.mkdir(parents=True, exist_ok=True)
+              resized = notif_base.resize((px, px), Image.Resampling.LANCZOS)
+              resized.save(out_dir / "ic_stat_watchcat.png")
+
+          # 6. Bildirim Vurgu Rengi (#FF6B4A)
+          values_dir = res_dir / "values"
+          values_dir.mkdir(parents=True, exist_ok=True)
+          colors_file = values_dir / "colors.xml"
+          if colors_file.exists():
+              ctext = colors_file.read_text()
+              if "watchcat_notification_color" not in ctext:
+                  ctext = ctext.replace(
+                      "</resources>",
+                      '    <color name="watchcat_notification_color">#FF6B4A</color>\n</resources>',
+                  )
+                  colors_file.write_text(ctext)
+          else:
+              colors_file.write_text(
+                  '<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<resources>\n'
+                  '    <color name="watchcat_notification_color">#FF6B4A</color>\n'
+                  '</resources>\n'
+              )
           EOF
 
       - name: Paketleri Yükle
