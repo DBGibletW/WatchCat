@@ -1,0 +1,136 @@
+name: WatchCat APK Derle
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu İndir
+        uses: actions/checkout@v4
+
+      - name: Java 21 Kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Flutter Kur
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Android Klasörünü Oluştur ve Firebase Bağla
+        run: |
+          cp pubspec.yaml /tmp/pubspec.yaml.bak
+          cp -r lib /tmp/lib.bak
+
+          if [ -f "android/app/google-services.json" ]; then
+            cp android/app/google-services.json /tmp/google-services.json
+          elif [ -f "google-services.json" ]; then
+            cp google-services.json /tmp/google-services.json
+          else
+            echo "HATA: google-services.json bulunamadi! Lutfen deponun ana dizinine yukleyin."
+            exit 1
+          fi
+
+          flutter create . --platforms=android --org com.dbgibletw --project-name watchcat
+
+          cp /tmp/pubspec.yaml.bak pubspec.yaml
+          rm -rf lib && cp -r /tmp/lib.bak lib
+          mkdir -p android/app
+          cp /tmp/google-services.json android/app/google-services.json
+
+          python3 - << 'EOF'
+          from pathlib import Path
+          import re
+
+          plugin_id = "com.google.gms.google-services"
+
+          # 1. settings.gradle(.kts) -> Google Services plugin ekle
+          settings_kts = Path("android/settings.gradle.kts")
+          settings_groovy = Path("android/settings.gradle")
+          if settings_kts.exists():
+              text = settings_kts.read_text()
+              if plugin_id not in text:
+                  text = re.sub(
+                      r'(id\("dev\.flutter\.flutter-plugin-loader"[^\n]*)',
+                      r'\1\n    id("com.google.gms.google-services") version "4.4.4" apply false',
+                      text,
+                      count=1,
+                  )
+                  settings_kts.write_text(text)
+          elif settings_groovy.exists():
+              text = settings_groovy.read_text()
+              if plugin_id not in text:
+                  text = re.sub(
+                      r'(id\s+["\']dev\.flutter\.flutter-plugin-loader["\'][^\n]*)',
+                      r'\1\n    id "com.google.gms.google-services" version "4.4.4" apply false',
+                      text,
+                      count=1,
+                  )
+                  settings_groovy.write_text(text)
+
+          # 2. app/build.gradle(.kts) -> Google Services uygula + minSdk = 24 yap
+          app_kts = Path("android/app/build.gradle.kts")
+          app_groovy = Path("android/app/build.gradle")
+          if app_kts.exists():
+              text = app_kts.read_text()
+              if plugin_id not in text:
+                  text = re.sub(
+                      r'(id\("dev\.flutter\.flutter-gradle-plugin"[^\n]*)',
+                      r'\1\n    id("com.google.gms.google-services")',
+                      text,
+                      count=1,
+                  )
+              text = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', text)
+              app_kts.write_text(text)
+          elif app_groovy.exists():
+              text = app_groovy.read_text()
+              if plugin_id not in text:
+                  text = re.sub(
+                      r'(id\s+["\']dev\.flutter\.flutter-gradle-plugin["\'][^\n]*)',
+                      r'\1\n    id "com.google.gms.google-services"',
+                      text,
+                      count=1,
+                  )
+              text = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', text)
+              text = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 24', text)
+              app_groovy.write_text(text)
+
+          # 3. AndroidManifest.xml -> Internet, Bildirim izni ve Uygulama Adı
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          if manifest.exists():
+              text = manifest.read_text()
+              perms = []
+              if "android.permission.INTERNET" not in text:
+                  perms.append('    <uses-permission android:name="android.permission.INTERNET"/>')
+              if "android.permission.POST_NOTIFICATIONS" not in text:
+                  perms.append('    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>')
+              if perms:
+                  text = re.sub(
+                      r'(<manifest[^>]*>)',
+                      r'\1\n' + "\n".join(perms),
+                      text,
+                      count=1,
+                  )
+              text = re.sub(r'android:label="[^"]*"', 'android:label="WatchCat"', text, count=1)
+              manifest.write_text(text)
+          EOF
+
+      - name: Paketleri Yükle
+        run: flutter pub get
+
+      - name: APK Derle
+        run: flutter build apk --release
+
+      - name: APK Dosyasını Yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: WatchCat-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
