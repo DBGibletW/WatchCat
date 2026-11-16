@@ -26,6 +26,11 @@ Future<void> main() async {
     DeviceOrientation.portraitUp,
   ]);
 
+  // Alttaki telefon butonlarını gizleyen tam ekran modu
+  await SystemChrome.setEnabledSystemUIMode(
+    SystemUiMode.immersiveSticky,
+  );
+
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -35,11 +40,11 @@ Future<void> main() async {
     ),
   );
 
-  runApp(const KediReelsApp());
+  runApp(const WatchCatApp());
 }
 
-class KediReelsApp extends StatelessWidget {
-  const KediReelsApp({super.key});
+class WatchCatApp extends StatelessWidget {
+  const WatchCatApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -48,7 +53,7 @@ class KediReelsApp extends StatelessWidget {
     const surfaceDark = Color(0xFF161620);
 
     return MaterialApp(
-      title: 'KediReels',
+      title: 'WatchCat',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: ThemeData(
@@ -156,6 +161,7 @@ class FcmSessionWrapper extends StatefulWidget {
 class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
   StreamSubscription<String>? _tokenRefreshSub;
   StreamSubscription<RemoteMessage>? _foregroundMessageSub;
+  StreamSubscription<RemoteMessage>? _openedAppSub;
 
   @override
   void initState() {
@@ -172,6 +178,9 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
         badge: true,
         sound: true,
       );
+
+      // Firebase Console'dan tek seferde herkese manuel bildirim atabilmek için
+      await messaging.subscribeToTopic('all_users');
 
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
         final apnsToken = await messaging.getAPNSToken();
@@ -204,8 +213,21 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             SnackBar(
               content: Text(text),
-              duration: const Duration(seconds: 3),
+              duration: const Duration(seconds: 4),
             ),
+          );
+        }
+      });
+
+      _openedAppSub =
+          FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+        if (!mounted) return;
+        final title = message.notification?.title;
+        final body = message.notification?.body;
+        if (title != null || body != null) {
+          final text = [title, body].whereType<String>().join(': ');
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text(text)),
           );
         }
       });
@@ -221,7 +243,7 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
         SetOptions(merge: true),
       );
     } catch (_) {
-      // Ağ hatası durumunda sessizce geçer, sonraki yenilemede tekrar dener.
+      // Ağ hatası durumunda sessizce geçer.
     }
   }
 
@@ -229,6 +251,7 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
   void dispose() {
     _tokenRefreshSub?.cancel();
     _foregroundMessageSub?.cancel();
+    _openedAppSub?.cancel();
     super.dispose();
   }
 
