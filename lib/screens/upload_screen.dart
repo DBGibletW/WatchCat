@@ -10,7 +10,14 @@ import 'package:image_picker/image_picker.dart';
 import 'package:video_player/video_player.dart';
 
 class UploadScreen extends StatefulWidget {
-  const UploadScreen({super.key});
+  const UploadScreen({
+    super.key,
+    this.isTabActive = true,
+    this.onUploadSuccess,
+  });
+
+  final bool isTabActive;
+  final VoidCallback? onUploadSuccess;
 
   @override
   State<UploadScreen> createState() => _UploadScreenState();
@@ -31,6 +38,21 @@ class _UploadScreenState extends State<UploadScreen> {
   bool _isCheckingVideo = false;
   bool _isUploading = false;
   double _uploadProgress = 0.0;
+
+  @override
+  void didUpdateWidget(covariant UploadScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isTabActive != widget.isTabActive) {
+      final controller = _previewController;
+      if (controller != null && controller.value.isInitialized) {
+        if (widget.isTabActive && !_isUploading) {
+          controller.play();
+        } else {
+          controller.pause();
+        }
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -77,7 +99,6 @@ class _UploadScreenState extends State<UploadScreen> {
         return;
       }
 
-      // 40 Saniye Kuralı: Cloudinary yüklemesinden önce kesin kontrol
       if (duration > _maxVideoDuration) {
         await tempController.dispose();
         await _previewController?.dispose();
@@ -96,7 +117,9 @@ class _UploadScreenState extends State<UploadScreen> {
       }
 
       await tempController.setLooping(true);
-      await tempController.play();
+      if (widget.isTabActive) {
+        await tempController.play();
+      }
 
       final oldController = _previewController;
       if (mounted) {
@@ -141,9 +164,7 @@ class _UploadScreenState extends State<UploadScreen> {
       if (firestoreName != null && firestoreName.isNotEmpty) {
         return firestoreName;
       }
-    } catch (_) {
-      // Firestore okunamazsa Auth bilgisine düşer.
-    }
+    } catch (_) {}
 
     final displayName = user.displayName?.trim();
     if (displayName != null && displayName.isNotEmpty) {
@@ -202,6 +223,20 @@ class _UploadScreenState extends State<UploadScreen> {
     }
   }
 
+  Future<void> _resetUploadForm() async {
+    final oldController = _previewController;
+    _descriptionController.clear();
+    if (mounted) {
+      setState(() {
+        _selectedVideoFile = null;
+        _previewController = null;
+        _videoDuration = null;
+        _uploadProgress = 0.0;
+      });
+    }
+    await oldController?.dispose();
+  }
+
   Future<void> _uploadAndSaveVideo() async {
     FocusScope.of(context).unfocus();
 
@@ -215,15 +250,6 @@ class _UploadScreenState extends State<UploadScreen> {
     if (duration == null || duration > _maxVideoDuration) {
       _showSnackBar(
         'Video süresi maksimum 40 saniye olabilir.',
-        isError: true,
-      );
-      return;
-    }
-
-    if (_cloudinaryCloudName == 'CLOUD_NAME_BURAYA' ||
-        _cloudinaryUploadPreset == 'UPLOAD_PRESET_BURAYA') {
-      _showSnackBar(
-        'Lütfen upload_screen.dart içindeki Cloudinary Cloud Name ve Upload Preset bilgilerini girin.',
         isError: true,
       );
       return;
@@ -258,7 +284,13 @@ class _UploadScreenState extends State<UploadScreen> {
 
       if (!mounted) return;
       _showSnackBar('Kedi videon başarıyla paylaşıldı!');
-      Navigator.of(context).pop(true);
+
+      if (widget.onUploadSuccess != null) {
+        await _resetUploadForm();
+        widget.onUploadSuccess!();
+      } else if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(true);
+      }
     } catch (e) {
       _showSnackBar('Yükleme başarısız: $e', isError: true);
     } finally {
@@ -274,6 +306,7 @@ class _UploadScreenState extends State<UploadScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: widget.onUploadSuccess == null,
         title: const Text(
           'Kedi Videosu Yükle',
           style: TextStyle(fontWeight: FontWeight.w700),
@@ -289,7 +322,7 @@ class _UploadScreenState extends State<UploadScreen> {
               GestureDetector(
                 onTap: _isUploading ? null : _pickVideoFromGallery,
                 child: Container(
-                  height: 360,
+                  height: 340,
                   decoration: BoxDecoration(
                     color: const Color(0xFF14141C),
                     borderRadius: BorderRadius.circular(20),
