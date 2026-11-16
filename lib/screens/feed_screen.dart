@@ -10,7 +10,14 @@ import 'package:video_player/video_player.dart';
 import 'upload_screen.dart';
 
 class FeedScreen extends StatefulWidget {
-  const FeedScreen({super.key});
+  const FeedScreen({
+    super.key,
+    this.isTabActive = true,
+    this.scrollToTopSignal = 0,
+  });
+
+  final bool isTabActive;
+  final int scrollToTopSignal;
 
   @override
   State<FeedScreen> createState() => _FeedScreenState();
@@ -31,6 +38,16 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
         .collection('videos')
         .orderBy('createdAt', descending: true)
         .snapshots();
+  }
+
+  @override
+  void didUpdateWidget(covariant FeedScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.scrollToTopSignal != widget.scrollToTopSignal &&
+        _pageController.hasClients) {
+      _pageController.jumpToPage(0);
+      _currentPageNotifier.value = 0;
+    }
   }
 
   @override
@@ -100,6 +117,8 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final isFeedVisible = _isScreenActive && widget.isTabActive;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -211,7 +230,7 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
                           key: ValueKey(doc.id),
                           videoId: doc.id,
                           data: doc.data(),
-                          isActive: index == currentPage && _isScreenActive,
+                          isActive: index == currentPage && isFeedVisible,
                         );
                       },
                     );
@@ -347,7 +366,6 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
   bool _hasVideoError = false;
   bool _isPausedByUser = false;
 
-  // Anti-Spam Kalp Kilidi + Optimistic UI durumları
   bool _isLiking = false;
   bool? _optimisticIsLiked;
   int? _optimisticLikesCount;
