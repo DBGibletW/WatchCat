@@ -25,10 +25,17 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Android Klasörünü Oluştur ve Firebase Bağla
+      - name: İkon Kütüphanesini Hazırla
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil
+
+      - name: Android Klasörünü Oluştur, Logo ve Firebase Bağla
         run: |
           cp pubspec.yaml /tmp/pubspec.yaml.bak
           cp -r lib /tmp/lib.bak
+
+          if [ -f "logo.png" ]; then
+            cp logo.png /tmp/logo.png
+          fi
 
           if [ -f "android/app/google-services.json" ]; then
             cp android/app/google-services.json /tmp/google-services.json
@@ -49,6 +56,7 @@ jobs:
           python3 - << 'EOF'
           from pathlib import Path
           import re
+          from PIL import Image, ImageDraw
 
           plugin_id = "com.google.gms.google-services"
 
@@ -121,6 +129,39 @@ jobs:
                   )
               text = re.sub(r'android:label="[^"]*"', 'android:label="WatchCat"', text, count=1)
               manifest.write_text(text)
+
+          # 4. WatchCat Uygulama İkonu (logo.png varsa onu, yoksa özel kedi logosunu kullan)
+          custom_logo = Path("/tmp/logo.png")
+          if custom_logo.exists():
+              base_icon = Image.open(custom_logo).convert("RGBA")
+          else:
+              size = 512
+              base_icon = Image.new("RGBA", (size, size), (20, 20, 28, 255))
+              draw = ImageDraw.Draw(base_icon)
+              coral = (255, 107, 74, 255)
+              white = (255, 255, 255, 255)
+
+              # Sol ve sağ kedi kulakları
+              draw.polygon([(115, 225), (140, 88), (238, 175)], fill=coral)
+              draw.polygon([(397, 225), (372, 88), (274, 175)], fill=coral)
+              # Kedi yüzü
+              draw.ellipse((106, 145, 406, 425), fill=coral)
+              # Ortada beyaz oynat (Play) üçgeni
+              draw.polygon([(220, 228), (220, 342), (322, 285)], fill=white)
+
+          mipmap_sizes = {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }
+          res_dir = Path("android/app/src/main/res")
+          for folder, px in mipmap_sizes.items():
+              out_dir = res_dir / folder
+              out_dir.mkdir(parents=True, exist_ok=True)
+              resized = base_icon.resize((px, px), Image.Resampling.LANCZOS)
+              resized.save(out_dir / "ic_launcher.png")
           EOF
 
       - name: Paketleri Yükle
