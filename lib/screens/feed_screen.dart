@@ -208,6 +208,7 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
                       valueListenable: _currentPageNotifier,
                       builder: (context, currentPage, _) {
                         return _VideoFeedItem(
+                          key: ValueKey(doc.id),
                           videoId: doc.id,
                           data: doc.data(),
                           isActive: index == currentPage && _isScreenActive,
@@ -324,6 +325,7 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
 
 class _VideoFeedItem extends StatefulWidget {
   const _VideoFeedItem({
+    super.key,
     required this.videoId,
     required this.data,
     required this.isActive,
@@ -339,6 +341,8 @@ class _VideoFeedItem extends StatefulWidget {
 
 class _VideoFeedItemState extends State<_VideoFeedItem> {
   VideoPlayerController? _controller;
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _commentsCountStream;
+
   bool _isInitialized = false;
   bool _hasVideoError = false;
   bool _isPausedByUser = false;
@@ -351,6 +355,11 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
   @override
   void initState() {
     super.initState();
+    _commentsCountStream = FirebaseFirestore.instance
+        .collection('videos')
+        .doc(widget.videoId)
+        .collection('comments')
+        .snapshots();
     _initVideoController();
   }
 
@@ -375,7 +384,6 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
 
       setState(() => _isInitialized = true);
 
-      // Video yüzeyi ekrana çizildikten hemen sonra otomatik oynat
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (!mounted) return;
         if (widget.isActive && !_isPausedByUser) {
@@ -765,16 +773,23 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
                           ),
                         ),
                         const SizedBox(height: 4),
-                        const Text(
-                          'Yorum',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            shadows: [
-                              Shadow(color: Colors.black54, blurRadius: 6),
-                            ],
-                          ),
+                        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                          stream: _commentsCountStream,
+                          builder: (context, snapshot) {
+                            final count = snapshot.data?.docs.length ?? 0;
+                            final label = count > 0 ? '$count' : 'Yorum';
+                            return Text(
+                              label,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                shadows: [
+                                  Shadow(color: Colors.black54, blurRadius: 6),
+                                ],
+                              ),
+                            );
+                          },
                         ),
                       ],
                     ),
