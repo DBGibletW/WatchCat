@@ -14,17 +14,69 @@ import 'screens/main_shell.dart';
 const MethodChannel _notificationChannel =
     MethodChannel('com.dbgibletw.watchcat/notifications');
 
-bool _isSubscribingAllUsers = false;
+class _FcmDiagnostics {
+  static int? sdkInt;
+  static String androidRelease = '';
+  static bool playServicesAvailable = true;
+  static String playServicesStatus = 'unknown';
+  static String channelStatus = 'unknown';
+  static bool tokenCreated = false;
+  static String tokenPreview = '';
+  static bool topicSubscribed = false;
+  static String lastMessageReceivedAt = '';
+  static String lastNotificationDisplayedAt = '';
+  static String lastError = '';
+
+  static void log(String message) {
+    debugPrint('[WatchCat-FCM] $message');
+  }
+
+  static Future<void> persistToFirestore() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set(
+        {
+          'fcmDiagnostics': {
+            'sdkInt': sdkInt,
+            'androidRelease': androidRelease,
+            'playServicesAvailable': playServicesAvailable,
+            'playServicesStatus': playServicesStatus,
+            'channelStatus': channelStatus,
+            'tokenCreated': tokenCreated,
+            'tokenPreview': tokenPreview,
+            'topicSubscribed': topicSubscribed,
+            'lastMessageReceivedAt': lastMessageReceivedAt,
+            'lastNotificationDisplayedAt': lastNotificationDisplayedAt,
+            'lastError': lastError,
+            'updatedAt': FieldValue.serverTimestamp(),
+          },
+        },
+        SetOptions(merge: true),
+      );
+    } catch (e) {
+      log('Tanilama Firestore kaydi basarisiz: $e');
+    }
+  }
+}
+
+bool _isSyncingFcm = false;
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
+  debugPrint(
+    '[WatchCat-FCM] Arka plan mesaji alindi: id=${message.messageId}, '
+    'title=${message.notification?.title}, data=${message.data}',
+  );
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp();
+  await FirebaseMessaging.instance.setAutoInitEnabled(true);
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
   await SystemChrome.setPreferredOrientations([
@@ -119,21 +171,108 @@ class WatchCatApp extends StatelessWidget {
   }
 }
 
-Future<void> _ensureAllUsersSubscribed({
+Future<String?> _fetchValidFcmToken() async {
+  final messaging = FirebaseMessaging.instance;
+
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+    final apnsToken = await messaging.getAPNSToken();
+    if (apnsToken == null) {
+      _FcmDiagnostics.log('iOS APNs token henuz hazir degil.');
+      return null;
+    }
+  }
+
+  String? token = await messaging.getToken();
+  if (token == null || token.trim().isEmpty) {
+    _FcmDiagnostics.log('Ilk denemede token bos dondu, tekrar deneniyor...');
+    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    token = await messaging.getToken();
+  }
+
+  if (token == null || token.trim().isEmpty) {
+    return null;
+  }
+
+  return token.trim();
+}
+
+Future<String?> _syncTokenAndTopicSubscription({
   required bool alreadySubscribed,
+  required bool playServicesAvailable,
+  required String playServicesStatus,
 }) async {
-  if (alreadySubscribed || _isSubscribingAllUsers) return;
-  _isSubscribingAllUsers = true;
+  if (_isSyncingFcm) return null;
+  _isSyncingFcm = true;
 
   try {
-    await FirebaseMessaging.instance.subscribeToTopic('all_users');
+    if (!playServicesAvailable) {
+      final err =
+          'Google Play Hizmetleri hazir degil ($playServicesStatus). Bildirim tokeni alinamiyor.';
+      _FcmDiagnostics.tokenCreated = false;
+      _FcmDiagnostics.topicSubscribed = false;
+      _FcmDiagnostics.lastError = err;
+      _FcmDiagnostics.log(err);
+      await _FcmDiagnostics.persistToFirestore();
+      return err;
+    }
+
+    // 1. Önce FCM registration token oluşturulduğunu doğrula
+    final token = await _fetchValidFcmToken().timeout(
+      const Duration(seconds: 15),
+    );
+
+    if (token == null || token.isEmpty) {
+      const err = 'FCM registration token olusturulamadi (bos/null).';
+      _FcmDiagnostics.tokenCreated = false;
+      _FcmDiagnostics.lastError = err;
+      _FcmDiagnostics.log(err);
+      await _FcmDiagnostics.persistToFirestore();
+      return err;
+    }
+
+    _FcmDiagnostics.tokenCreated = true;
+    _FcmDiagnostics.tokenPreview =
+        token.length > 12 ? '${token.substring(0, 12)}...' : token;
+    _FcmDiagnostics.log('FCM token olusturuldu: ${_FcmDiagnostics.tokenPreview}');
+
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser != null) {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(currentUser.uid)
+          .set({'fcmToken': token}, SetOptions(merge: true));
+    }
+
+    // 2. Token doğrulandıktan sonra "all_users" topic aboneliğini tamamla
+    if (alreadySubscribed) {
+      _FcmDiagnostics.topicSubscribed = true;
+      _FcmDiagnostics.lastError = '';
+      _FcmDiagnostics.log('all_users topic aboneligi zaten kayitli.');
+      await _FcmDiagnostics.persistToFirestore();
+      return null;
+    }
+
+    await FirebaseMessaging.instance
+        .subscribeToTopic('all_users')
+        .timeout(const Duration(seconds: 15));
+
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       await _notificationChannel.invokeMethod<bool>('markAllUsersSubscribed');
     }
-  } catch (_) {
-    // Çevrimdışı durumda sessizce geçer, izin aktifken sonraki kontrolde tamamlanır.
+
+    _FcmDiagnostics.topicSubscribed = true;
+    _FcmDiagnostics.lastError = '';
+    _FcmDiagnostics.log('all_users topic aboneligi basariyla tamamlandi.');
+    await _FcmDiagnostics.persistToFirestore();
+    return null;
+  } catch (e) {
+    final err = 'FCM token/abonelik hatasi: $e';
+    _FcmDiagnostics.lastError = err;
+    _FcmDiagnostics.log(err);
+    await _FcmDiagnostics.persistToFirestore();
+    return err;
   } finally {
-    _isSubscribingAllUsers = false;
+    _isSyncingFcm = false;
   }
 }
 
@@ -172,25 +311,6 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _hasHandledInitialCheck) {
       _handleNotificationPermission(isInitialLaunch: false);
-    }
-  }
-
-  Future<void> _syncFcmAfterGrant({required bool alreadySubscribed}) async {
-    try {
-      await _ensureAllUsersSubscribed(alreadySubscribed: alreadySubscribed);
-
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser != null) {
-        final token = await FirebaseMessaging.instance.getToken();
-        if (token != null && token.isNotEmpty) {
-          await FirebaseFirestore.instance
-              .collection('users')
-              .doc(currentUser.uid)
-              .set({'fcmToken': token}, SetOptions(merge: true));
-        }
-      }
-    } catch (_) {
-      // Ağ veya Google Play Services kaynaklı geçici hatalarda uygulamanın çökmesini önler.
     }
   }
 
@@ -276,24 +396,50 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
         return;
       }
 
+      // Android 8+ bildirim kanalını ön planda oluştur (Android 7.1.2'de güvenle atlar)
       final state = await _notificationChannel
           .invokeMapMethod<String, dynamic>('getNotificationState');
       if (state == null) return;
 
+      final sdkInt = state['sdkInt'] as int?;
+      final androidRelease = (state['androidRelease'] ?? '').toString();
       final isAndroid13OrAbove = state['isAndroid13OrAbove'] == true;
       final granted = state['granted'] == true;
       final shouldRequestRuntime = state['shouldRequestRuntime'] == true;
       final alreadySubscribed = state['allUsersSubscribed'] == true;
+      final playServicesAvailable = state['playServicesAvailable'] != false;
+      final playServicesStatus =
+          (state['playServicesStatus'] ?? 'SUCCESS').toString();
+      final channelStatus = (state['channelStatus'] ?? 'unknown').toString();
+
+      _FcmDiagnostics.sdkInt = sdkInt;
+      _FcmDiagnostics.androidRelease = androidRelease;
+      _FcmDiagnostics.playServicesAvailable = playServicesAvailable;
+      _FcmDiagnostics.playServicesStatus = playServicesStatus;
+      _FcmDiagnostics.channelStatus = channelStatus;
+      _FcmDiagnostics.topicSubscribed = alreadySubscribed;
+      _FcmDiagnostics.log(
+        'Durum: Android $androidRelease (SDK $sdkInt), '
+        'granted=$granted, channel=$channelStatus, playServices=$playServicesStatus',
+      );
 
       if (shouldRequestRuntime) {
-        // Android 13, 14, 15+: İlk açılışta gerçek sistem bildirim izni penceresi
         final grantedNow = await _notificationChannel
                 .invokeMethod<bool>('requestNotificationPermission') ??
             false;
         _lastKnownGranted = grantedNow;
 
         if (grantedNow) {
-          await _syncFcmAfterGrant(alreadySubscribed: alreadySubscribed);
+          final error = await _syncTokenAndTopicSubscription(
+            alreadySubscribed: alreadySubscribed,
+            playServicesAvailable: playServicesAvailable,
+            playServicesStatus: playServicesStatus,
+          );
+          if (error != null && mounted) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(content: Text(error)),
+            );
+          }
         } else {
           await _showEnableNotificationsDialog();
         }
@@ -303,9 +449,18 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
       if (granted) {
         final becameEnabled = _lastKnownGranted == false;
         _lastKnownGranted = true;
-        await _syncFcmAfterGrant(alreadySubscribed: alreadySubscribed);
 
-        if (becameEnabled && mounted) {
+        final error = await _syncTokenAndTopicSubscription(
+          alreadySubscribed: alreadySubscribed,
+          playServicesAvailable: playServicesAvailable,
+          playServicesStatus: playServicesStatus,
+        );
+
+        if (error != null && mounted && isInitialLaunch) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            SnackBar(content: Text(error)),
+          );
+        } else if (becameEnabled && mounted) {
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
             const SnackBar(
               content: Text('WatchCat bildirimleri etkinleştirildi.'),
@@ -316,18 +471,18 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
       }
 
       _lastKnownGranted = false;
+      await _FcmDiagnostics.persistToFirestore();
 
       if (isInitialLaunch) {
         if (!isAndroid13OrAbove) {
-          // Android 11 ve 12: Bildirimler kapalıysa uygulama içi bilgilendirme ekranını göster
           await _showEnableNotificationsDialog();
         } else {
-          // Android 13+: Daha önce reddedildiyse tekrar sistem penceresi zorlama
           _showSettingsHintSnackBar();
         }
       }
-    } catch (_) {
-      // İzin kontrolü başarısız olsa bile uygulama çalışmaya devam eder.
+    } catch (e) {
+      _FcmDiagnostics.lastError = 'Izin kontrol hatasi: $e';
+      _FcmDiagnostics.log(_FcmDiagnostics.lastError);
     } finally {
       _hasHandledInitialCheck = true;
       _isChecking = false;
@@ -344,7 +499,11 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
       if (current.authorizationStatus == AuthorizationStatus.authorized ||
           current.authorizationStatus == AuthorizationStatus.provisional) {
         _lastKnownGranted = true;
-        await _syncFcmAfterGrant(alreadySubscribed: false);
+        await _syncTokenAndTopicSubscription(
+          alreadySubscribed: false,
+          playServicesAvailable: true,
+          playServicesStatus: 'N/A',
+        );
         return;
       }
 
@@ -360,7 +519,11 @@ class _NotificationBootstrapperState extends State<_NotificationBootstrapper>
                 requested.authorizationStatus == AuthorizationStatus.provisional;
         _lastKnownGranted = grantedNow;
         if (grantedNow) {
-          await _syncFcmAfterGrant(alreadySubscribed: false);
+          await _syncTokenAndTopicSubscription(
+            alreadySubscribed: false,
+            playServicesAvailable: true,
+            playServicesStatus: 'N/A',
+          );
         }
       }
     } catch (_) {}
@@ -433,12 +596,25 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
       final messaging = FirebaseMessaging.instance;
       bool isGranted = false;
       bool alreadySubscribed = false;
+      bool playServicesAvailable = true;
+      String playServicesStatus = 'SUCCESS';
 
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
         final state = await _notificationChannel
             .invokeMapMethod<String, dynamic>('getNotificationState');
         isGranted = state?['granted'] == true;
         alreadySubscribed = state?['allUsersSubscribed'] == true;
+        playServicesAvailable = state?['playServicesAvailable'] != false;
+        playServicesStatus =
+            (state?['playServicesStatus'] ?? 'SUCCESS').toString();
+
+        _FcmDiagnostics.sdkInt = state?['sdkInt'] as int?;
+        _FcmDiagnostics.androidRelease =
+            (state?['androidRelease'] ?? '').toString();
+        _FcmDiagnostics.playServicesAvailable = playServicesAvailable;
+        _FcmDiagnostics.playServicesStatus = playServicesStatus;
+        _FcmDiagnostics.channelStatus =
+            (state?['channelStatus'] ?? 'unknown').toString();
       } else {
         final settings = await messaging.getNotificationSettings();
         isGranted =
@@ -447,35 +623,64 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
       }
 
       if (isGranted) {
-        await _ensureAllUsersSubscribed(alreadySubscribed: alreadySubscribed);
-
-        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
-          final apnsToken = await messaging.getAPNSToken();
-          if (apnsToken != null) {
-            final token = await messaging.getToken();
-            if (token != null && token.isNotEmpty) {
-              await _saveFcmToken(token);
-            }
-          }
-        } else {
-          final token = await messaging.getToken();
-          if (token != null && token.isNotEmpty) {
-            await _saveFcmToken(token);
-          }
-        }
+        await _syncTokenAndTopicSubscription(
+          alreadySubscribed: alreadySubscribed,
+          playServicesAvailable: playServicesAvailable,
+          playServicesStatus: playServicesStatus,
+        );
       }
 
-      _tokenRefreshSub = messaging.onTokenRefresh.listen((newToken) {
-        if (newToken.isNotEmpty) {
-          _saveFcmToken(newToken);
-        }
+      _tokenRefreshSub = messaging.onTokenRefresh.listen((newToken) async {
+        if (newToken.isEmpty) return;
+        _FcmDiagnostics.tokenCreated = true;
+        _FcmDiagnostics.tokenPreview = newToken.length > 12
+            ? '${newToken.substring(0, 12)}...'
+            : newToken;
+        _FcmDiagnostics.log('FCM token yenilendi.');
+        await _saveFcmToken(newToken);
+        await _FcmDiagnostics.persistToFirestore();
       });
 
       _foregroundMessageSub =
-          FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+          FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
+        _FcmDiagnostics.lastMessageReceivedAt =
+            DateTime.now().toIso8601String();
+        final title =
+            message.notification?.title ?? message.data['title']?.toString();
+        final body =
+            message.notification?.body ?? message.data['body']?.toString();
+        _FcmDiagnostics.log(
+          'On plan mesaji alindi: id=${message.messageId}, title=$title',
+        );
+
+        final displayTitle = (title == null || title.isEmpty) ? 'WatchCat' : title;
+        final displayBody = body ?? '';
+
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          try {
+            final res = await _notificationChannel
+                .invokeMapMethod<String, dynamic>('showLocalNotification', {
+              'title': displayTitle,
+              'body': displayBody,
+            });
+            if (res?['shown'] == true) {
+              _FcmDiagnostics.lastNotificationDisplayedAt =
+                  DateTime.now().toIso8601String();
+              _FcmDiagnostics.log('On plan sistem bildirimi gosterildi.');
+            } else {
+              _FcmDiagnostics.lastError =
+                  'On plan bildirimi gosterilemedi: ${res?['error']}';
+              _FcmDiagnostics.log(_FcmDiagnostics.lastError);
+            }
+          } catch (e) {
+            _FcmDiagnostics.lastError = 'On plan bildirim hatasi: $e';
+            _FcmDiagnostics.log(_FcmDiagnostics.lastError);
+          }
+        }
+
+        await _FcmDiagnostics.persistToFirestore();
+
         if (!mounted) return;
-        final title = message.notification?.title;
-        final body = message.notification?.body;
         if (title != null || body != null) {
           final text = [title, body].whereType<String>().join(': ');
           ScaffoldMessenger.maybeOf(context)?.showSnackBar(
@@ -489,6 +694,15 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
 
       _openedAppSub =
           FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+        _FcmDiagnostics.lastMessageReceivedAt =
+            DateTime.now().toIso8601String();
+        _FcmDiagnostics.lastNotificationDisplayedAt =
+            DateTime.now().toIso8601String();
+        _FcmDiagnostics.log(
+          'Arka plan bildirimine tiklandi: id=${message.messageId}',
+        );
+        _FcmDiagnostics.persistToFirestore();
+
         if (!mounted) return;
         final title = message.notification?.title;
         final body = message.notification?.body;
@@ -499,8 +713,10 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
           );
         }
       });
-    } catch (_) {
-      // Cihazda Google Play Services veya APNs yoksa akışın çökmesini engeller.
+    } catch (e) {
+      _FcmDiagnostics.lastError = 'FCM oturum kurulum hatasi: $e';
+      _FcmDiagnostics.log(_FcmDiagnostics.lastError);
+      await _FcmDiagnostics.persistToFirestore();
     }
   }
 
@@ -510,8 +726,9 @@ class _FcmSessionWrapperState extends State<FcmSessionWrapper> {
         {'fcmToken': token},
         SetOptions(merge: true),
       );
-    } catch (_) {
-      // Ağ hatası durumunda sessizce geçer.
+    } catch (e) {
+      _FcmDiagnostics.lastError = 'Token Firestore kayit hatasi: $e';
+      _FcmDiagnostics.log(_FcmDiagnostics.lastError);
     }
   }
 
