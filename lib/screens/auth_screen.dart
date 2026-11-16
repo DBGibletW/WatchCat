@@ -230,7 +230,7 @@ class _AuthScreenState extends State<AuthScreen> {
                       ),
                       const SizedBox(height: 16),
                       const Text(
-                        'KediReels',
+                        'WatchCat',
                         style: TextStyle(
                           fontSize: 30,
                           fontWeight: FontWeight.w800,
