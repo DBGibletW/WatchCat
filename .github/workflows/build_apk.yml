@@ -144,7 +144,7 @@ jobs:
 
           res_dir = Path("android/app/src/main/res")
 
-          # 4. WatchCat Ana Uygulama İkonu (logo.png varsa onu, yoksa özel kedi logosunu kullan)
+          # 4. WatchCat Ana Uygulama İkonu
           custom_logo = Path("/tmp/logo.png")
           if custom_logo.exists():
               base_icon = Image.open(custom_logo).convert("RGBA")
@@ -173,7 +173,7 @@ jobs:
               resized = base_icon.resize((px, px), Image.Resampling.LANCZOS)
               resized.save(out_dir / "ic_launcher.png")
 
-          # 5. WatchCat Bildirim İkonu (Orta-Büyük Boyutlu Şeffaf Kedi Silüeti)
+          # 5. WatchCat Bildirim İkonu
           notif_base = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
           notif_draw = ImageDraw.Draw(notif_base)
           pure_white = (255, 255, 255, 255)
@@ -222,10 +222,12 @@ jobs:
         run: flutter pub get
 
       - name: APK Derle
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release
+          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/WatchCat.apk
 
       - name: APK Dosyasını Yükle
         uses: actions/upload-artifact@v4
         with:
           name: WatchCat-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/WatchCat.apk
