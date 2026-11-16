@@ -28,7 +28,7 @@ jobs:
       - name: İkon Kütüphanesini Hazırla
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-pil
 
-      - name: Android Klasörünü Oluştur, Logo ve Firebase Bağla
+      - name: Android Klasörünü Oluştur, Bildirim İzni, Logo ve Firebase Bağla
         run: |
           cp pubspec.yaml /tmp/pubspec.yaml.bak
           cp -r lib /tmp/lib.bak
@@ -84,7 +84,7 @@ jobs:
                   )
                   settings_groovy.write_text(text)
 
-          # 2. app/build.gradle(.kts) -> Google Services uygula + minSdk = 24 yap
+          # 2. app/build.gradle(.kts) -> Google Services + minSdk 24 + compileSdk/targetSdk >= 35
           app_kts = Path("android/app/build.gradle.kts")
           app_groovy = Path("android/app/build.gradle")
           if app_kts.exists():
@@ -96,6 +96,16 @@ jobs:
                       text,
                       count=1,
                   )
+              text = re.sub(
+                  r'compileSdk\s*=\s*flutter\.compileSdkVersion',
+                  'compileSdk = Math.max(flutter.compileSdkVersion, 35)',
+                  text,
+              )
+              text = re.sub(
+                  r'targetSdk\s*=\s*flutter\.targetSdkVersion',
+                  'targetSdk = Math.max(flutter.targetSdkVersion, 35)',
+                  text,
+              )
               text = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', text)
               app_kts.write_text(text)
           elif app_groovy.exists():
@@ -107,11 +117,178 @@ jobs:
                       text,
                       count=1,
                   )
+              text = re.sub(
+                  r'compileSdk\s*=\s*flutter\.compileSdkVersion',
+                  'compileSdk = Math.max(flutter.compileSdkVersion, 35)',
+                  text,
+              )
+              text = re.sub(
+                  r'compileSdkVersion\s+flutter\.compileSdkVersion',
+                  'compileSdkVersion Math.max(flutter.compileSdkVersion, 35)',
+                  text,
+              )
+              text = re.sub(
+                  r'targetSdk\s*=\s*flutter\.targetSdkVersion',
+                  'targetSdk = Math.max(flutter.targetSdkVersion, 35)',
+                  text,
+              )
+              text = re.sub(
+                  r'targetSdkVersion\s+flutter\.targetSdkVersion',
+                  'targetSdkVersion Math.max(flutter.targetSdkVersion, 35)',
+                  text,
+              )
               text = re.sub(r'minSdk\s*=\s*flutter\.minSdkVersion', 'minSdk = 24', text)
               text = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 24', text)
               app_groovy.write_text(text)
 
-          # 3. AndroidManifest.xml -> İzinler, Uygulama Adı ve FCM Bildirim İkonu
+          # 3. MainActivity.kt -> Android 10-12 / 13+ Bildirim İzni Kanalı
+          main_activity = Path("android/app/src/main/kotlin/com/dbgibletw/watchcat/MainActivity.kt")
+          main_activity.parent.mkdir(parents=True, exist_ok=True)
+          main_activity.write_text('''package com.dbgibletw.watchcat
+
+          import android.Manifest
+          import android.app.NotificationManager
+          import android.content.ActivityNotFoundException
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.provider.Settings
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              companion object {
+                  private const val CHANNEL = "com.dbgibletw.watchcat/notifications"
+                  private const val REQUEST_CODE_POST_NOTIFICATIONS = 1001
+                  private const val PREFS_NAME = "watchcat_notification_prefs"
+                  private const val KEY_ASKED_BEFORE = "asked_post_notifications"
+              }
+
+              private var pendingPermissionResult: MethodChannel.Result? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+                      .setMethodCallHandler { call, result ->
+                          when (call.method) {
+                              "getNotificationState" -> {
+                                  result.success(buildNotificationState())
+                              }
+                              "requestNotificationPermission" -> {
+                                  handleRequestPermission(result)
+                              }
+                              "openNotificationSettings" -> {
+                                  openAppNotificationSettings()
+                                  result.success(true)
+                              }
+                              else -> result.notImplemented()
+                          }
+                      }
+              }
+
+              private fun areNotificationsEnabled(): Boolean {
+                  val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                  return manager?.areNotificationsEnabled() ?: true
+              }
+
+              private fun buildNotificationState(): Map<String, Any> {
+                  val sdkInt = Build.VERSION.SDK_INT
+                  val isAndroid13OrAbove = sdkInt >= Build.VERSION_CODES.TIRAMISU
+                  val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                  val askedBefore = prefs.getBoolean(KEY_ASKED_BEFORE, false)
+
+                  val granted = if (isAndroid13OrAbove) {
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                          PackageManager.PERMISSION_GRANTED && areNotificationsEnabled()
+                  } else {
+                      areNotificationsEnabled()
+                  }
+
+                  val shouldRequestRuntime = isAndroid13OrAbove &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                      PackageManager.PERMISSION_GRANTED &&
+                      !askedBefore
+
+                  return mapOf(
+                      "sdkInt" to sdkInt,
+                      "isAndroid13OrAbove" to isAndroid13OrAbove,
+                      "granted" to granted,
+                      "askedBefore" to askedBefore,
+                      "shouldRequestRuntime" to shouldRequestRuntime,
+                  )
+              }
+
+              private fun handleRequestPermission(result: MethodChannel.Result) {
+                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                      result.success(areNotificationsEnabled())
+                      return
+                  }
+
+                  if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                      PackageManager.PERMISSION_GRANTED
+                  ) {
+                      result.success(areNotificationsEnabled())
+                      return
+                  }
+
+                  val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                  prefs.edit().putBoolean(KEY_ASKED_BEFORE, true).apply()
+
+                  pendingPermissionResult?.success(false)
+                  pendingPermissionResult = result
+
+                  requestPermissions(
+                      arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                      REQUEST_CODE_POST_NOTIFICATIONS,
+                  )
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int,
+                  permissions: Array<out String>,
+                  grantResults: IntArray,
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+                  if (requestCode == REQUEST_CODE_POST_NOTIFICATIONS) {
+                      val granted = grantResults.isNotEmpty() &&
+                          grantResults[0] == PackageManager.PERMISSION_GRANTED &&
+                          areNotificationsEnabled()
+                      pendingPermissionResult?.success(granted)
+                      pendingPermissionResult = null
+                  }
+              }
+
+              private fun openAppNotificationSettings() {
+                  val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                          putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                      }
+                  } else {
+                      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                          data = Uri.fromParts("package", packageName, null)
+                      }
+                  }
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+                  try {
+                      startActivity(intent)
+                  } catch (_: ActivityNotFoundException) {
+                      val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                          data = Uri.fromParts("package", packageName, null)
+                          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      }
+                      startActivity(fallback)
+                  }
+              }
+          }
+          '''.replace("\n          ", "\n").lstrip())
+
+          # 4. AndroidManifest.xml -> İzinler, Uygulama Adı ve FCM Bildirim İkonu
           manifest = Path("android/app/src/main/AndroidManifest.xml")
           if manifest.exists():
               text = manifest.read_text()
@@ -144,7 +321,7 @@ jobs:
 
           res_dir = Path("android/app/src/main/res")
 
-          # 4. WatchCat Ana Uygulama İkonu
+          # 5. WatchCat Ana Uygulama İkonu
           custom_logo = Path("/tmp/logo.png")
           if custom_logo.exists():
               base_icon = Image.open(custom_logo).convert("RGBA")
@@ -173,7 +350,7 @@ jobs:
               resized = base_icon.resize((px, px), Image.Resampling.LANCZOS)
               resized.save(out_dir / "ic_launcher.png")
 
-          # 5. WatchCat Bildirim İkonu
+          # 6. WatchCat Bildirim İkonu
           notif_base = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
           notif_draw = ImageDraw.Draw(notif_base)
           pure_white = (255, 255, 255, 255)
@@ -197,7 +374,7 @@ jobs:
               resized = notif_base.resize((px, px), Image.Resampling.LANCZOS)
               resized.save(out_dir / "ic_stat_watchcat.png")
 
-          # 6. Bildirim Vurgu Rengi (#FF6B4A)
+          # 7. Bildirim Vurgu Rengi (#FF6B4A)
           values_dir = res_dir / "values"
           values_dir.mkdir(parents=True, exist_ok=True)
           colors_file = values_dir / "colors.xml"
