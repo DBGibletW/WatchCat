@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import 'upload_screen.dart';
@@ -17,18 +18,27 @@ class FeedScreen extends StatefulWidget {
 
 class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
   final PageController _pageController = PageController();
-  int _currentPage = 0;
+  final ValueNotifier<int> _currentPageNotifier = ValueNotifier<int>(0);
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _videosStream;
+
   bool _isScreenActive = true;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _videosStream = FirebaseFirestore.instance
+        .collection('videos')
+        .orderBy('createdAt', descending: true)
+        .snapshots();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
+    if (state == AppLifecycleState.resumed) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
     final shouldBeActive = state == AppLifecycleState.resumed;
     if (_isScreenActive != shouldBeActive) {
       setState(() => _isScreenActive = shouldBeActive);
@@ -38,6 +48,7 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _currentPageNotifier.dispose();
     _pageController.dispose();
     super.dispose();
   }
@@ -50,11 +61,12 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
     );
 
     if (!mounted) return;
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     setState(() => _isScreenActive = true);
 
     if (uploaded == true && _pageController.hasClients) {
       _pageController.jumpToPage(0);
-      setState(() => _currentPage = 0);
+      _currentPageNotifier.value = 0;
     }
   }
 
@@ -88,19 +100,15 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final videosStream = FirebaseFirestore.instance
-        .collection('videos')
-        .orderBy('createdAt', descending: true)
-        .snapshots();
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
           StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: videosStream,
+            stream: _videosStream,
             builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
+              if (snapshot.connectionState == ConnectionState.waiting &&
+                  !snapshot.hasData) {
                 return const Center(
                   child: CircularProgressIndicator(),
                 );
@@ -186,22 +194,36 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
                 );
               }
 
-              return PageView.builder(
+              return PageView.custom(
                 controller: _pageController,
                 scrollDirection: Axis.vertical,
-                itemCount: docs.length,
                 onPageChanged: (index) {
-                  setState(() => _currentPage = index);
+                  _currentPageNotifier.value = index;
                 },
-                itemBuilder: (context, index) {
-                  final doc = docs[index];
-                  return _VideoFeedItem(
-                    key: ValueKey(doc.id),
-                    videoId: doc.id,
-                    data: doc.data(),
-                    isActive: index == _currentPage && _isScreenActive,
-                  );
-                },
+                childrenDelegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final doc = docs[index];
+                    return ValueListenableBuilder<int>(
+                      key: ValueKey(doc.id),
+                      valueListenable: _currentPageNotifier,
+                      builder: (context, currentPage, _) {
+                        return _VideoFeedItem(
+                          videoId: doc.id,
+                          data: doc.data(),
+                          isActive: index == currentPage && _isScreenActive,
+                        );
+                      },
+                    );
+                  },
+                  childCount: docs.length,
+                  findChildIndexCallback: (Key key) {
+                    if (key is ValueKey<String>) {
+                      final idx = docs.indexWhere((d) => d.id == key.value);
+                      return idx == -1 ? null : idx;
+                    }
+                    return null;
+                  },
+                ),
               );
             },
           ),
@@ -230,7 +252,7 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
                         ),
                         SizedBox(width: 6),
                         Text(
-                          'KediReels',
+                          'WatchCat',
                           style: TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.w800,
@@ -302,7 +324,6 @@ class _FeedScreenState extends State<FeedScreen> with WidgetsBindingObserver {
 
 class _VideoFeedItem extends StatefulWidget {
   const _VideoFeedItem({
-    super.key,
     required this.videoId,
     required this.data,
     required this.isActive,
@@ -345,6 +366,7 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
       _controller = controller;
       await controller.initialize();
       await controller.setLooping(true);
+      await controller.setVolume(1.0);
 
       if (!mounted) {
         await controller.dispose();
@@ -353,9 +375,20 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
 
       setState(() => _isInitialized = true);
 
-      if (widget.isActive && !_isPausedByUser) {
-        await controller.play();
-      }
+      // Video yüzeyi ekrana çizildikten hemen sonra otomatik oynat
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        if (widget.isActive && !_isPausedByUser) {
+          await controller.play();
+          await Future<void>.delayed(const Duration(milliseconds: 220));
+          if (mounted &&
+              widget.isActive &&
+              !_isPausedByUser &&
+              !controller.value.isPlaying) {
+            await controller.play();
+          }
+        }
+      });
     } catch (_) {
       if (mounted) {
         setState(() => _hasVideoError = true);
@@ -426,7 +459,6 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
 
-    // 600ms Anti-Spam kilidi aktifse tıklamaları yoksay
     if (_isLiking) return;
 
     final uid = currentUser.uid;
@@ -572,7 +604,6 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
               ),
             ),
 
-          // Alt yazıların her videoda okunabilmesi için yumuşak koyu geçiş
           Positioned(
             left: 0,
             right: 0,
@@ -594,7 +625,6 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
             ),
           ),
 
-          // Sol alt köşe: @kullanici_adi ve açıklama
           Positioned(
             left: 16,
             right: 92,
@@ -666,7 +696,6 @@ class _VideoFeedItemState extends State<_VideoFeedItem> {
             ),
           ),
 
-          // Sağ alt köşe: Kalp beğenisi ve Yorumlar butonu
           Positioned(
             right: 12,
             bottom: 28,
@@ -771,7 +800,19 @@ class _CommentsBottomSheet extends StatefulWidget {
 
 class _CommentsBottomSheetState extends State<_CommentsBottomSheet> {
   final TextEditingController _commentController = TextEditingController();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _commentsStream;
   bool _isSending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _commentsStream = FirebaseFirestore.instance
+        .collection('videos')
+        .doc(widget.videoId)
+        .collection('comments')
+        .orderBy('createdAt', descending: true)
+        .snapshots();
+  }
 
   @override
   void dispose() {
@@ -789,9 +830,7 @@ class _CommentsBottomSheetState extends State<_CommentsBottomSheet> {
       if (firestoreName != null && firestoreName.isNotEmpty) {
         return firestoreName;
       }
-    } catch (_) {
-      // Firestore okuma başarısız olursa Auth displayName kullanılır.
-    }
+    } catch (_) {}
 
     final displayName = user.displayName?.trim();
     if (displayName != null && displayName.isNotEmpty) {
@@ -845,171 +884,169 @@ class _CommentsBottomSheetState extends State<_CommentsBottomSheet> {
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
-    final commentsStream = FirebaseFirestore.instance
-        .collection('videos')
-        .doc(widget.videoId)
-        .collection('comments')
-        .orderBy('createdAt', descending: true)
-        .snapshots();
 
-    return Padding(
-      padding: EdgeInsets.only(bottom: bottomInset),
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.68,
-        child: Column(
-          children: [
-            const SizedBox(height: 10),
-            Container(
-              width: 42,
-              height: 4,
-              decoration: BoxDecoration(
-                color: const Color(0xFF3A3A4C),
-                borderRadius: BorderRadius.circular(2),
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.65,
+          child: Column(
+            children: [
+              const SizedBox(height: 10),
+              Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF3A3A4C),
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-            ),
-            const SizedBox(height: 14),
-            const Text(
-              'Yorumlar',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-                color: Colors.white,
+              const SizedBox(height: 14),
+              const Text(
+                'Yorumlar',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            const Divider(height: 1, color: Color(0xFF262634)),
-            Expanded(
-              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                stream: commentsStream,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
+              const SizedBox(height: 12),
+              const Divider(height: 1, color: Color(0xFF262634)),
+              Expanded(
+                child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: _commentsStream,
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting &&
+                        !snapshot.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
 
-                  final docs = snapshot.data?.docs ?? [];
-                  if (docs.isEmpty) {
-                    return const Center(
-                      child: Text(
-                        'Henüz yorum yok. İlk yorumu sen yaz!',
-                        style: TextStyle(color: Color(0xFFA0A0B2)),
-                      ),
-                    );
-                  }
-
-                  return ListView.separated(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 14,
-                    ),
-                    itemCount: docs.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 14),
-                    itemBuilder: (context, index) {
-                      final data = docs[index].data();
-                      final username =
-                          (data['username'] ?? 'kedi_sever').toString();
-                      final text = (data['text'] ?? '').toString();
-
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            width: 34,
-                            height: 34,
-                            decoration: const BoxDecoration(
-                              color: Color(0x26FF6B4A),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(
-                              Icons.pets_rounded,
-                              size: 17,
-                              color: Color(0xFFFF6B4A),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  '@$username',
-                                  style: const TextStyle(
-                                    color: Color(0xFFFF937A),
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                                const SizedBox(height: 3),
-                                Text(
-                                  text,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 14,
-                                    height: 1.35,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                    final docs = snapshot.data?.docs ?? [];
+                    if (docs.isEmpty) {
+                      return const Center(
+                        child: Text(
+                          'Henüz yorum yok. İlk yorumu sen yaz!',
+                          style: TextStyle(color: Color(0xFFA0A0B2)),
+                        ),
                       );
-                    },
-                  );
-                },
+                    }
+
+                    return ListView.separated(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      itemCount: docs.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 14),
+                      itemBuilder: (context, index) {
+                        final data = docs[index].data();
+                        final username =
+                            (data['username'] ?? 'kedi_sever').toString();
+                        final text = (data['text'] ?? '').toString();
+
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Container(
+                              width: 34,
+                              height: 34,
+                              decoration: const BoxDecoration(
+                                color: Color(0x26FF6B4A),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.pets_rounded,
+                                size: 17,
+                                color: Color(0xFFFF6B4A),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '@$username',
+                                    style: const TextStyle(
+                                      color: Color(0xFFFF937A),
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    text,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
-            ),
-            const Divider(height: 1, color: Color(0xFF262634)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _commentController,
-                      enabled: !_isSending,
-                      maxLength: 300,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _sendComment(),
-                      decoration: const InputDecoration(
-                        hintText: 'Kedi hakkında yorum yaz...',
-                        counterText: '',
-                        contentPadding: EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 12,
+              const Divider(height: 1, color: Color(0xFF262634)),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 18),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _commentController,
+                        enabled: !_isSending,
+                        maxLength: 300,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => _sendComment(),
+                        decoration: const InputDecoration(
+                          hintText: 'Kedi hakkında yorum yaz...',
+                          counterText: '',
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  SizedBox(
-                    width: 46,
-                    height: 46,
-                    child: FilledButton(
-                      onPressed: _isSending ? null : _sendComment,
-                      style: FilledButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        backgroundColor: const Color(0xFFFF6B4A),
-                        shape: const CircleBorder(),
-                      ),
-                      child: _isSending
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      width: 46,
+                      height: 46,
+                      child: FilledButton(
+                        onPressed: _isSending ? null : _sendComment,
+                        style: FilledButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          backgroundColor: const Color(0xFFFF6B4A),
+                          shape: const CircleBorder(),
+                        ),
+                        child: _isSending
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.send_rounded,
+                                size: 20,
                                 color: Colors.white,
                               ),
-                            )
-                          : const Icon(
-                              Icons.send_rounded,
-                              size: 20,
-                              color: Colors.white,
-                            ),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
