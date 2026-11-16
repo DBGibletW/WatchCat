@@ -165,8 +165,6 @@ jobs:
           import android.os.Bundle
           import android.provider.Settings
           import android.util.Log
-          import com.google.android.gms.common.ConnectionResult
-          import com.google.android.gms.common.GoogleApiAvailability
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
@@ -265,15 +263,27 @@ jobs:
 
               private fun checkGooglePlayServices(): Pair<Boolean, String> {
                   return try {
-                      val availability = GoogleApiAvailability.getInstance()
-                      val code = availability.isGooglePlayServicesAvailable(this)
-                      val ok = code == ConnectionResult.SUCCESS
-                      val status = availability.getErrorString(code)
+                      val gmsClass = Class.forName("com.google.android.gms.common.GoogleApiAvailability")
+                      val getInstance = gmsClass.getMethod("getInstance")
+                      val instance = getInstance.invoke(null)
+                      val isAvailable = gmsClass.getMethod("isGooglePlayServicesAvailable", Context::class.java)
+                      val code = (isAvailable.invoke(instance, this) as? Int) ?: -1
+                      val getErrorString = gmsClass.getMethod("getErrorString", Int::class.javaPrimitiveType)
+                      val status = (getErrorString.invoke(instance, code) as? String) ?: "code_$code"
+                      val ok = code == 0
                       Log.d(TAG, "Google Play Services: ok=$ok, status=$status (code=$code)")
                       Pair(ok, status)
-                  } catch (e: Throwable) {
-                      Log.e(TAG, "Google Play Services kontrol hatasi", e)
-                      Pair(false, e.message ?: "check_failed")
+                  } catch (_: Throwable) {
+                      try {
+                          val info = packageManager.getApplicationInfo("com.google.android.gms", 0)
+                          if (info.enabled) {
+                              Pair(true, "INSTALLED_ENABLED")
+                          } else {
+                              Pair(false, "SERVICE_DISABLED")
+                          }
+                      } catch (_: Throwable) {
+                          Pair(false, "SERVICE_MISSING")
+                      }
                   }
               }
 
