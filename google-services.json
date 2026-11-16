@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "901019190658",
+    "project_id": "watchcat-20204",
+    "storage_bucket": "watchcat-20204.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:901019190658:android:f7772ca4d75d6f18c6fb9b",
+        "android_client_info": {
+          "package_name": "com.dbgibletw.watchcat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCM8Cx0q3nbIhmXocd6OuVEmK524uw_WNc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
